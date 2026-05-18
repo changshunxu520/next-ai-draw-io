@@ -114,6 +114,138 @@ const ANTHROPIC_BETA_HEADERS = {
     "anthropic-beta": "fine-grained-tool-streaming-2025-05-14",
 }
 
+function isPackyApiBaseURL(baseURL: string): boolean {
+    try {
+        const hostname = new URL(baseURL).hostname.toLowerCase()
+        return hostname === "packyapi.com" || hostname.endsWith(".packyapi.com")
+    } catch {
+        return baseURL.toLowerCase().includes("packyapi")
+    }
+}
+
+function normalizePackyApiToolCallIndexes(
+    data: any,
+    activeToolCallIndexes: Map<number, number>,
+): void {
+    const choices = data?.choices
+    if (!Array.isArray(choices)) return
+
+    choices.forEach((choice: any, choicePosition: number) => {
+        const choiceIndex =
+            typeof choice?.index === "number" ? choice.index : choicePosition
+        const toolCalls = choice?.delta?.tool_calls
+        if (!Array.isArray(toolCalls)) return
+
+        for (const toolCall of toolCalls) {
+            const hasToolIdentity =
+                typeof toolCall?.id === "string" ||
+                typeof toolCall?.type === "string" ||
+                typeof toolCall?.function?.name === "string"
+            const hasArgumentsDelta =
+                typeof toolCall?.function?.arguments === "string"
+
+            if (hasToolIdentity && typeof toolCall.index === "number") {
+                // The first named chunk establishes the canonical tool index
+                // for later argument-only deltas from the same choice.
+                activeToolCallIndexes.set(choiceIndex, toolCall.index)
+                continue
+            }
+
+            const activeIndex = activeToolCallIndexes.get(choiceIndex)
+            if (
+                hasArgumentsDelta &&
+                activeIndex !== undefined &&
+                toolCall.index !== activeIndex
+            ) {
+                // PackyApi can emit argument fragments under index 1 even
+                // though the tool call started at index 0. AI SDK groups
+                // streamed arguments by this field, so keep the stream stable.
+                toolCall.index = activeIndex
+            }
+        }
+
+        if (choice?.finish_reason) {
+            activeToolCallIndexes.delete(choiceIndex)
+        }
+    })
+}
+
+function createPackyApiCompatibilityFetch(
+    baseURL: string,
+): typeof fetch | undefined {
+    if (!isPackyApiBaseURL(baseURL)) return undefined
+
+    return async (url, options) => {
+        const response = await fetch(url, options)
+        if (
+            !response.body ||
+            !response.headers
+                .get("content-type")
+                ?.toLowerCase()
+                .includes("text/event-stream")
+        ) {
+            return response
+        }
+
+        const activeToolCallIndexes = new Map<number, number>()
+        const decoder = new TextDecoder()
+        const encoder = new TextEncoder()
+        let buffer = ""
+
+        const transformStream = new TransformStream({
+            transform(chunk, controller) {
+                buffer += decoder.decode(chunk, { stream: true })
+
+                let messageEndPos
+                while ((messageEndPos = buffer.indexOf("\n\n")) !== -1) {
+                    const message = buffer.substring(0, messageEndPos)
+                    buffer = buffer.substring(messageEndPos + 2)
+                    const lines = message.split("\n")
+                    const dataLineIndex = lines.findIndex((line) =>
+                        line.startsWith("data: "),
+                    )
+
+                    if (dataLineIndex === -1) {
+                        controller.enqueue(encoder.encode(`${message}\n\n`))
+                        continue
+                    }
+
+                    const jsonStr = lines[dataLineIndex].substring(6).trim()
+                    if (jsonStr === "[DONE]") {
+                        controller.enqueue(encoder.encode(`${message}\n\n`))
+                        continue
+                    }
+
+                    try {
+                        const data = JSON.parse(jsonStr)
+                        normalizePackyApiToolCallIndexes(
+                            data,
+                            activeToolCallIndexes,
+                        )
+                        lines[dataLineIndex] = `data: ${JSON.stringify(data)}`
+                        controller.enqueue(
+                            encoder.encode(`${lines.join("\n")}\n\n`),
+                        )
+                    } catch (_error) {
+                        controller.enqueue(encoder.encode(`${message}\n\n`))
+                    }
+                }
+            },
+            flush(controller) {
+                if (buffer.trim()) {
+                    controller.enqueue(encoder.encode(buffer))
+                }
+            },
+        })
+
+        return new Response(response.body.pipeThrough(transformStream), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        })
+    }
+}
+
 /**
  * Resolve baseURL based on whether user is providing their own API key.
  * When user provides their own API key, we should NOT fall back to server's
@@ -820,7 +952,13 @@ export function getAIModel(overrides?: ClientOverrides): ModelConfig {
             if (baseURL) {
                 // Custom base URL = third-party proxy, use Chat Completions API
                 // for compatibility (most proxies don't support /responses endpoint)
-                const customOpenAI = createOpenAI({ apiKey, baseURL })
+                const compatibilityFetch =
+                    createPackyApiCompatibilityFetch(baseURL)
+                const customOpenAI = createOpenAI({
+                    apiKey,
+                    baseURL,
+                    ...(compatibilityFetch && { fetch: compatibilityFetch }),
+                })
                 model = customOpenAI.chat(modelId)
             } else if (overrides?.apiKey) {
                 // Custom API key but official OpenAI endpoint, use Responses API
@@ -1293,7 +1431,7 @@ export function getAIModel(overrides?: ClientOverrides): ModelConfig {
                 overrides?.apiKey,
                 overrides?.baseUrl,
                 resolveBaseUrlEnv(overrides, "KIMI_BASE_URL"),
-                PROVIDER_INFO["kimi"]?.defaultBaseUrl,
+                PROVIDER_INFO.kimi?.defaultBaseUrl,
             )
             // Use createDeepSeek to properly handle reasoning_content for Kimi
             // thinking models (e.g., kimi-k2.6). Kimi's API uses the same

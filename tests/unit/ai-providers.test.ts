@@ -253,6 +253,120 @@ vi.mock("@ai-sdk/deepseek", () => {
     return { createDeepSeek: mockCreateDeepSeek, deepseek: mockDeepseek }
 })
 
+vi.mock("@ai-sdk/openai", () => {
+    const mockModel = { modelId: "test-model" }
+    const mockProviderFn = vi.fn(() => mockModel) as any
+    mockProviderFn.chat = vi.fn(() => mockModel)
+    const mockCreateOpenAI = vi.fn(() => mockProviderFn)
+    const mockOpenAI = vi.fn(() => mockModel)
+    return { createOpenAI: mockCreateOpenAI, openai: mockOpenAI }
+})
+
+describe("PackyApi OpenAI-compatible stream compatibility", () => {
+    let createOpenAIMock: ReturnType<typeof vi.fn>
+    const savedFetch = globalThis.fetch
+
+    beforeEach(async () => {
+        const mod = await import("@ai-sdk/openai")
+        createOpenAIMock = mod.createOpenAI as ReturnType<typeof vi.fn>
+        createOpenAIMock.mockClear()
+    })
+
+    afterEach(() => {
+        globalThis.fetch = savedFetch
+    })
+
+    it("normalizes PackyApi streamed tool argument chunks to the active tool index", async () => {
+        getAIModel({
+            provider: "openai",
+            apiKey: "test-openai-key",
+            baseUrl: "https://api-slb.packyapi.com/v1",
+            modelId: "gpt-5.5",
+        })
+
+        const createArgs = createOpenAIMock.mock.calls[0][0]
+        expect(createArgs.fetch).toBeTypeOf("function")
+
+        const firstToolChunk = {
+            choices: [
+                {
+                    index: 0,
+                    delta: {
+                        tool_calls: [
+                            {
+                                id: "call_1",
+                                index: 0,
+                                type: "function",
+                                function: {
+                                    name: "get_weather",
+                                    arguments: "",
+                                },
+                            },
+                        ],
+                    },
+                    finish_reason: null,
+                },
+            ],
+        }
+        const wrongArgumentChunk = {
+            choices: [
+                {
+                    index: 0,
+                    delta: {
+                        tool_calls: [
+                            {
+                                index: 1,
+                                function: { arguments: '{"' },
+                            },
+                        ],
+                    },
+                    finish_reason: null,
+                },
+            ],
+        }
+        const upstreamBody = [
+            `data: ${JSON.stringify(firstToolChunk)}\n\n`,
+            `data: ${JSON.stringify(wrongArgumentChunk)}\n\n`,
+            "data: [DONE]\n\n",
+        ].join("")
+
+        globalThis.fetch = vi.fn(async () => {
+            return new Response(new TextEncoder().encode(upstreamBody), {
+                headers: { "content-type": "text/event-stream" },
+            })
+        }) as typeof fetch
+
+        const response = await createArgs.fetch(
+            "https://api-slb.packyapi.com/v1/chat/completions",
+            {},
+        )
+        const normalized = await response.text()
+        const messages = normalized
+            .trim()
+            .split("\n\n")
+            .filter((message: string) => message.startsWith("data: "))
+        const normalizedArgumentChunk = JSON.parse(
+            messages[1].substring("data: ".length),
+        )
+
+        expect(
+            normalizedArgumentChunk.choices[0].delta.tool_calls[0].index,
+        ).toBe(0)
+    })
+
+    it("does not install the compatibility fetch for other OpenAI-compatible endpoints", () => {
+        getAIModel({
+            provider: "openai",
+            apiKey: "test-openai-key",
+            baseUrl: "https://example.com/v1",
+            modelId: "gpt-5.5",
+        })
+
+        const createArgs = createOpenAIMock.mock.calls[0][0]
+        expect(createArgs).not.toHaveProperty("fetch")
+    })
+})
+
 describe("Kimi provider uses createDeepSeek for reasoning_content support", () => {
     let createDeepSeekMock: ReturnType<typeof vi.fn>
     const savedEnv: Record<string, string | undefined> = {}
