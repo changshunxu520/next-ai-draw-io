@@ -8,10 +8,10 @@ on:
     inputs:
       version:
         description: "Version tag (e.g., v0.4.5)"
-        required: false
+        required: true
 
 jobs:
-  # Mac and Linux: Build and publish directly (no signing needed)
+  # Mac and Linux: Build and upload directly (no signing needed)
   build-mac-linux:
     permissions:
       contents: write
@@ -46,12 +46,21 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build and publish
-        run: npm run dist:${{ matrix.platform }}
+      - name: Build app
+        run: npm run dist:${{ matrix.platform }} -- --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Windows: Build, sign with SignPath, then publish
+      - name: Upload artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Windows: Build and publish unsigned artifacts
   build-windows:
     permissions:
       contents: write
@@ -95,5 +104,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*.exe
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
