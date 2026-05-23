@@ -57,6 +57,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify bundled draw.io assets
+        run: test -f electron-standalone/public/drawio/index.html
+
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
@@ -105,6 +108,10 @@ jobs:
         run: npm run dist:win:build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify bundled draw.io assets
+        shell: bash
+        run: test -f electron-standalone/public/drawio/index.html
 
       - name: Upload unsigned artifacts
         uses: actions/upload-artifact@v6
