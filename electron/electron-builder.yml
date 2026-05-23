@@ -1,6 +1,6 @@
-appId: com.nextaidrawio.app
-productName: Next AI Draw.io
-copyright: Copyright © 2024 Next AI Draw.io
+appId: com.hj.aidrawio.app
+productName: HJ AI Draw.io
+copyright: Copyright © 2026 HJ AI Draw.io
 electronVersion: 39.2.7
 
 directories:
@@ -85,7 +85,7 @@ nsis:
 linux:
   icon: resources/icon.png
   category: Office
-  maintainer: Next AI Draw.io <nextaidrawio@users.noreply.github.com>
+  maintainer: HJ AI Draw.io <nextaidrawio@users.noreply.github.com>
   target:
     - target: AppImage
       arch:
